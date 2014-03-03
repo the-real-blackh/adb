@@ -1,0 +1,8 @@
+*~
+dist/
+*.o
+*.hi
+programs/generate-rsa-key
+programs/generate-rsa-key.exe
+programs/adb-shell
+programs/adb-shell.exe
