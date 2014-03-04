@@ -97,7 +97,7 @@ main = withSocketsDo $ do
             ) Nothing ais
         case mSocket of
             Nothing -> do
-                hPutStrLn stderr $ "can't resolve host "++host
+                hPutStrLn stderr $ "failed to connect to "++host++":"++port
                 exitFailure
             Just skt -> do
                 let stra = socketTransport skt
