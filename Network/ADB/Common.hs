@@ -4,13 +4,20 @@ module Network.ADB.Common where
 import Network.ADB.Transport
 
 import Control.Applicative
+import Control.Concurrent
+import Control.Exception
 import Control.Monad.Error
 import Data.Bits
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import Data.List
+import Data.Map (Map)
+import qualified Data.Map as M
+import Data.Sequence (Seq, (<|), (|>))
+import qualified Data.Sequence as Seq
 import Data.Serialize
 import Data.Word
+import Prelude hiding (read)
 
 
 mAX_PAYLOAD :: Word32
@@ -85,4 +92,133 @@ readPacket rem = do
     when (len > fromIntegral mAX_PAYLOAD) $ throwError IllegalData
     payload <- if len == 0 then pure B.empty else readFully rem (fromIntegral len)
     return $ Packet cmd arg0 arg1 payload
+
+data Session m = Session (IO Word32) (Packet -> m ()) (m Packet)
+
+withSession :: Transport (ErrorT TransportError IO)
+            -> (Session (ErrorT TransportError IO) -> ErrorT TransportError IO a)
+            -> ErrorT TransportError IO a
+withSession tra code = do
+    nextLocalIDRef <- liftIO $ newMVar 0
+    let doAlloc 0      = doAlloc 1
+        doAlloc nextID = return $ (nextID+1, nextID)
+        allocLocalID = modifyMVar nextLocalIDRef doAlloc
+
+    (chansVar, ch) <- liftIO $ do
+        me <- myThreadId
+        ch <- newChan
+        chansVar <- newMVar $ M.insert me ch M.empty
+        return (chansVar, ch)
+    let readPkt = do
+            ee <- liftIO $ do
+                ch <- modifyMVar chansVar $ \chans -> do
+                    me <- myThreadId
+                    case me `M.lookup` chans of
+                        Just ch -> return (chans, ch)
+                        Nothing -> do
+                            ch' <- dupChan ch
+                            return (M.insert me ch' chans, ch')
+                readChan ch
+            case ee of
+                Left err -> throwError err
+                Right pkt -> return pkt
+
+    readThr <- liftIO $ forkIO $ do
+        forever $ do
+            epkt <- runErrorT $ readPacket tra
+            case epkt of
+                Left err -> writeChan ch (Left err)
+                Right pkt -> writeChan ch (Right pkt)
+
+    ee <- liftIO $ runErrorT (code (Session allocLocalID (write tra . formatPacket) readPkt))
+      `finally` killThread readThr
+    case ee of
+        Left err -> throwError err
+        Right a  -> return a
+
+withConversation :: Session (ErrorT TransportError IO)
+                                  -> Word32
+                                  -> Word32
+                                  -> (Transport (ErrorT TransportError IO) -> ErrorT TransportError IO a)
+                                  -> ErrorT TransportError IO a
+withConversation session@(Session allocLocalID writePkt readPkt0) localID remoteID code = do
+    queueVar <- liftIO $ newMVar Seq.empty
+    (chansVar, ch) <- liftIO $ do
+        me <- myThreadId
+        ch <- newChan
+        chansVar <- newMVar $ M.insert me ch M.empty
+        return (chansVar, ch)
+    let readPkt = do
+            ee <- liftIO $ do
+                ch <- modifyMVar chansVar $ \chans -> do
+                    me <- myThreadId
+                    case me `M.lookup` chans of
+                        Just ch -> return (chans, ch)
+                        Nothing -> do
+                            ch' <- dupChan ch
+                            return (M.insert me ch' chans, ch')
+                readChan ch
+            case ee of
+                Left err -> throwError err
+                Right pkt -> return pkt
+
+    readThr <- liftIO $ forkIO $ do
+        forever $ do
+            epkt <- runErrorT $ readPkt0
+            case epkt of
+                Left err -> writeChan ch (Left err)
+                Right pkt -> do
+                    case pktCommand pkt of
+                        WRTE | pktArg1 pkt == localID -> do
+                            modifyMVar_ queueVar $ return . (|> pktPayload pkt)
+                            runErrorT $ writePkt $ Packet OKAY localID remoteID B.empty
+                            writeChan ch (Right pkt)
+                        _                             -> writeChan ch (Right pkt)
+
+    let traNew = Transport {
+            write =
+                let writeLoop bs = case bs of
+                        bs | B.null bs -> return ()
+                        bs -> do
+                            let (now, next) = B.splitAt (fromIntegral mAX_PAYLOAD) bs
+                            writePkt $ Packet WRTE localID remoteID now
+                            let awaitResult = do
+                                    pkt <- readPkt
+                                    case pktCommand pkt of
+                                        CLSE | pktArg1 pkt == localID -> throwError ClosedByPeer
+                                        OKAY | pktArg0 pkt == remoteID -> writeLoop next
+                                        _ -> awaitResult
+                            awaitResult
+                in  \bs -> writeLoop bs,
+            read = \n -> do
+                let readLoop = do
+                        q <- liftIO $ readMVar queueVar
+                        if Seq.length q == 0 then do
+                                pkt <- readPkt
+                                case pktCommand pkt of
+                                    CLSE | pktArg1 pkt == localID -> throwError ClosedByPeer
+                                    _ -> readLoop
+                            else do
+                                let hd = q `Seq.index` 0
+                                if B.length hd > n then do
+                                    let (mine, notMine) = B.splitAt n hd
+                                    liftIO $ modifyMVar_ queueVar $ return . (\q -> notMine <| Seq.drop 1 q)
+                                    return mine
+                                  else do
+                                    liftIO $ modifyMVar_ queueVar $ return . (Seq.drop 1)
+                                    return hd
+                readLoop,
+            close = do
+                writePkt $ Packet CLSE localID remoteID B.empty
+                let awaitResult = do
+                        pkt <- readPkt
+                        case pktCommand pkt of
+                            CLSE | pktArg1 pkt == localID -> throwError ClosedByPeer
+                            _ -> awaitResult
+                awaitResult
+          }
+    ea <- liftIO $ runErrorT (code traNew) `finally` killThread readThr
+    case ea of
+        Left err -> throwError err
+        Right a  -> return a
 
