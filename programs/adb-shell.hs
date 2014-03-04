@@ -69,6 +69,7 @@ main = withSocketsDo $ do
                                         hFlush stdout
                                     terminal tra
                     return ()
+                  `finally` sClose s
                 return ()
             return ()
         forever $ threadDelay 10000000
