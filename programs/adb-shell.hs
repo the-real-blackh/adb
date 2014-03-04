@@ -78,7 +78,7 @@ main = withSocketsDo $ do
         putStrLn ""
         putStrLn "Default port 5555 is used by a local Android emulator:"
         putStrLn "  Make sure you enable USB debugging in your emulator, which you'll"
-        putStrLn "  find under '{ } Developer options'"
+        putStrLn "  find in settings under '{ } Developer options'"
         putStrLn "  press ctrl-D or 'exit' to quit"
         putStrLn ""
         let hints = defaultHints { addrSocketType = Stream }
