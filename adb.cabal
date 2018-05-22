@@ -2,7 +2,7 @@
 -- see http://haskell.org/cabal/users-guide/
 
 name:                adb
-version:             0.1.0.0
+version:             0.1.0.1
 synopsis:            Android Debug Bridge (ADB) protocol
 -- description:         
 license:             BSD3
@@ -31,8 +31,8 @@ library
                        Network.ADB.Socket
   other-modules:       Network.ADB.Common
   other-extensions:    ScopedTypeVariables, FlexibleContexts, OverloadedStrings, ForeignFunctionInterface, EmptyDataDecls
-  build-depends:       base >=4.6 && <4.8,
-                       mtl >=2.1 && <2.2,
+  build-depends:       base >=4.6 && <4.11,
+                       mtl >=2.1 && <2.3,
                        bytestring >=0.10,
                        network >=2.4,
                        containers >=0.5,
